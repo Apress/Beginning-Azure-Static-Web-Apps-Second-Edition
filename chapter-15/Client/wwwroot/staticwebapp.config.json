@@ -1,0 +1,41 @@
+{
+
+  "auth": {
+    "rolesSource": "/api/GetRoles",
+    "identityProviders": {
+      "customOpenIdConnectProviders": {
+        "mycustomauth": {
+          "registration": {
+            "clientIdSettingName": "AUTH_CLIENT_ID",
+            "clientCredential": {
+              "clientSecretSettingName": "AUTH_CLIENT_SECRET"
+            },
+            "openIdConnectConfiguration": {
+              "wellKnownOpenIdConfiguration": "https://cashmore-duurkoop.eu.auth0.com/.well-known/openid-configuration"
+            }
+          },
+          "login": {
+            "nameClaimType": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name",
+            "scopes": [ "email", "openid", "profile" ],
+            "loginParameterNames": []
+          }
+        }
+      }
+    }
+  },
+  "routes": [
+    {
+      "route": "/api/blogposts",
+      "methods": [ "POST", "PUT", "DELETE" ],
+      "allowedRoles": [ "admin" ]
+    }
+  ],
+  "navigationFallback": {
+    "rewrite": "index.html",
+    "exclude": [
+      "/images/*.{png,jpg,gif}",
+      "/css/*",
+      "/api/*"
+    ]
+  }
+}

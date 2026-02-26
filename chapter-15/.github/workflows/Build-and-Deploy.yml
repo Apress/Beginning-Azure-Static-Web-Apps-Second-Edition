@@ -1,0 +1,180 @@
+name: Build and Deploy Application
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '.github/workflows/IaC.yml'
+      - '.github/workflows/custom-domain.yml'
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+    branches:
+      - main
+
+permissions:
+    id-token: write
+    contents: read
+    pull-requests: write
+
+jobs:
+  build-and-test:
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.action != 'closed')
+    runs-on: ubuntu-latest
+    name: Build and Test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+          include-prerelease: false
+          
+      - name: Client Build
+        run: dotnet publish ./Client/Client.csproj --output ./dist/client
+
+      - name: Api Build
+        run: dotnet publish ./Api/Api.csproj --output ./dist/api
+    
+    #   When you add tests this line will ensure that 
+    #      they are ran as part of your pipeline
+    #   - name: 'Run Tests'
+    #     run: dotnet test --configuration Release
+  
+      - name: Upload Published Files
+        uses: actions/upload-artifact@v4
+        with:
+          name: Application
+          path: dist
+          retention-days: 1
+          include-hidden-files: true
+
+  deploy-to-swa:
+    runs-on: ubuntu-latest
+    name: Deploy
+    needs: build-and-test
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.action != 'closed')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+            name: Application
+            path: ./dist
+
+      - name: Azure login with OIDC
+        uses: azure/login@v2
+        with:
+            client-id: ${{ secrets.AZURE_CLIENT_ID }}
+            tenant-id: ${{ secrets.AZURE_DIRECTORY_ID }}
+            subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+            # We are forcing a different flow because of 
+            #    MSAL issues at time of writing
+            enable-AzPSSession: false
+            allow-no-subscriptions: true
+
+      - name: Get SWA deployment token
+        id: swa-secret
+        uses: azure/CLI@v2
+        with:
+          azcliversion: latest
+          inlineScript: |
+            az config set extension.use_dynamic_install=yes_without_prompt
+            SWA_SECRET=$(az staticwebapp secrets list -n ${{vars.SWA_NAME}} -g ${{vars.RESOURCE_GROUP}} --query 'properties.apiKey' -o tsv )
+            echo "::add-mask::$SWA_SECRET"
+            echo SWA_SECRET=$SWA_SECRET >> $GITHUB_OUTPUT
+
+      - name: Set the SWA environment
+        id: swa-env
+        run: |
+          if [ "${{ github.event_name }}" == "push" ]; then
+            echo "ENVIRONMENT=production">> $GITHUB_OUTPUT
+          else
+            echo "ENVIRONMENT=staging${{ github.event.number }}" >> $GITHUB_OUTPUT
+          fi
+
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+
+      - name: Install SWA CLI
+        run:  npm install -g @azure/static-web-apps-cli
+
+      - name: Deploy Artifacts to SWA
+        env:
+          SWA_CLI_APP_NAME: ${{vars.SWA_NAME}}
+          SWA_CLI_RESOURCE_GROUP: ${{vars.RESOURCE_GROUP}}
+          SWA_NON_INTERACTIVE: true
+        run: |
+          swa deploy deploy-config \
+            --deployment-token ${{ steps.swa-secret.outputs.SWA_SECRET }} \
+            --env ${{ steps.swa-env.outputs.ENVIRONMENT }} \
+            --app-name ${{vars.SWA_NAME}} \
+            --resource-group ${{vars.RESOURCE_GROUP}} \
+            --config swa-cli.config.json
+
+      - name: Get Staging Hostname
+        uses: azure/CLI@v2
+        if: github.event_name == 'pull_request'
+        id: get-hostname
+        with:
+          inlineScript: |
+            SWA_HOSTNAME=$(az staticwebapp environment list \
+              -n ${{vars.SWA_NAME}} \
+              -g ${{vars.RESOURCE_GROUP}} \
+              --query "[?contains(hostname, \
+                '${{ steps.swa-env.outputs.ENVIRONMENT }}')].hostname " \
+              -o tsv)
+            echo $SWA_HOSTNAME
+            echo SWA_HOSTNAME=$SWA_HOSTNAME >> $GITHUB_OUTPUT
+
+      - name: Update Pull Request
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const output = `#### Staging Environment Updated
+
+            Test here https://${{ steps.get-hostname.outputs.SWA_HOSTNAME }}
+
+            *Pushed by: @${{ github.actor }}*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+
+  close_pull_request_job:
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    name: Close Pull Request Job
+    steps:
+      - name: Azure login with OIDC
+        uses: azure/login@v2
+        with:
+            client-id: ${{ secrets.AZURE_CLIENT_ID }}
+            tenant-id: ${{ secrets.AZURE_DIRECTORY_ID }}
+            subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+            enable-AzPSSession: false
+            allow-no-subscriptions: true 
+        
+      - name: Remove Staging Environment
+        id: get-api-key
+        uses: azure/CLI@v2
+        with:
+          azcliversion: latest
+          inlineScript: |
+            az staticwebapp environment delete \
+              --name ${{vars.SWA_NAME}} \
+              --resource-group ${{vars.RESOURCE_GROUP}} \
+              --environment-name staging${{ github.event.number }} \
+              --yes

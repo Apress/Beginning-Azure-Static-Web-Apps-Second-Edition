@@ -1,0 +1,141 @@
+﻿@page "/blogposts/{author}/{id:guid}/edit"
+@page "/blogposts/new"
+@using Microsoft.AspNetCore.Authorization
+@using Models
+@inject BlogpostService service
+@inject TagService tagsService
+@inject NavigationManager navigationManager
+
+<AuthorizeView Roles="admin">
+    <Authorized>
+        @if (blogpost is null)
+        {
+            <div>Loading...</div>
+        }
+        else
+        {
+            <EditForm Model="blogpost" OnValidSubmit="Save" Context="EditContext">
+
+                <div>
+                    <label>Title</label>
+                    <div>
+                        <InputText @bind-Value=blogpost.Title />
+                    </div>
+                </div>
+                <TagInput SelectedTags="@tags"
+                          AvailableTags="@tagsService.Tags.OrderBy(tag => tag).ToList()"
+                          Placeholder="Add Tag"
+                          SelectedTagsChanged="@((tags) => UpdateTags(tags))" />
+
+                <div>
+                    <label>Post</label>
+                    <div>
+                        <InputTextArea @bind-Value=blogpost.BlogpostMarkdown
+                                       style="width: 100%; height: 60vh; min-height: 100px;" />
+                    </div>
+                </div>
+                <button type="submit">Save</button>
+
+            </EditForm>
+        }
+    </Authorized>
+</AuthorizeView>
+
+@code {
+    [Parameter]
+    public Guid? Id { get; set; }
+    [Parameter]
+    public string? Author { get; set; }
+
+    private EditableBlogpost? blogpost;
+    private List<string> tags = [];
+    private Mode mode;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        await tagsService.LoadTags();
+        if (navigationManager.Uri.EndsWith("/blogposts/new"))
+        {
+            mode = Mode.Create;
+            blogpost = new();
+            return;
+        }
+
+        if (Id is null
+          || Id == Guid.Empty
+          || string.IsNullOrWhiteSpace(Author))
+        {
+            navigationManager.NavigateTo("/404");
+            return;
+        }
+
+        var loadedPost = await service.GetBlogpost(Id.Value, Author);
+        if (loadedPost is null)
+        {
+            navigationManager.NavigateTo("/404");
+            return;
+        }
+
+        mode = Mode.Edit;
+        blogpost = new EditableBlogpost
+        {
+            Id = loadedPost!.Id,
+            Title = loadedPost.Title,
+            Author = loadedPost.Author,
+            PublishedDate = loadedPost.PublishedDate,
+            BlogpostMarkdown = loadedPost.BlogpostMarkdown
+        };
+        tags = loadedPost.Tags.ToList();
+    }
+
+    private class EditableBlogpost
+    {
+        public Guid? Id { get; set; } = null;
+        public string Title { get; set; } = string.Empty;
+        public string Author { get; set; } = string.Empty;
+        public DateTime PublishedDate { get; set; }
+        public string BlogpostMarkdown { get; set; } = string.Empty;
+
+        public Blogpost ToBlogPost(string[] tags) => new Blogpost
+        (
+          Id.GetValueOrDefault(),
+          Title,
+          Author,
+          PublishedDate,
+          tags,
+          BlogpostMarkdown
+        );
+    }
+
+    private void UpdateTags(List<string> updatedTags)
+    {
+        tags = updatedTags;
+    }
+
+    private async void Save()
+    {
+        var postTags = tags.ToArray();
+
+        var blogpostToSave = blogpost.ToBlogPost(postTags);
+        string blogpostUrl = string.Empty;
+        if (mode == Mode.Create)
+        {
+            var newPost = await service.Create(blogpostToSave);
+            blogpostUrl = $"blogposts/{newPost!.Author}/{newPost.Id}";
+        }
+        else
+        {
+            await service.Update(blogpostToSave);
+            blogpostUrl = $"blogposts/{blogpost!.Author}/{blogpost.Id}";
+        }
+
+        navigationManager.NavigateTo(blogpostUrl);
+    }
+
+
+    private enum Mode
+    {
+        Create,
+        Edit
+    }
+}

@@ -1,0 +1,25 @@
+﻿@page "/blogposts"
+@inject BlogpostSummaryService service
+
+<PageTitle>Blogposts</PageTitle>
+<h1>Blogposts</h1>
+
+@if (service.Summaries is null)
+{
+    <div>Loading...</div>
+}
+else
+{
+    foreach (var blogpostSummary in service.Summaries.OrderByDescending(bps => bps.PublishedDate))
+    {
+        <BlogpostSummary Summary="@blogpostSummary" />
+    }
+}
+
+@code
+{
+    protected override async Task OnInitializedAsync()
+    {
+        await service.LoadBlogpostSummaries();
+    }
+}

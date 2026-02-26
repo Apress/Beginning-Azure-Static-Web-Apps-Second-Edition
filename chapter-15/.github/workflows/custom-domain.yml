@@ -1,0 +1,217 @@
+name: Azure Static Web App DNS Setup
+
+on:
+  workflow_dispatch
+  
+permissions:
+    id-token: write # Required for OIDC authentication
+    contents: read  # Required for actions/checkout
+
+jobs:
+  setup-dns:
+    runs-on: ubuntu-latest
+    env:   
+      DNS_RESOURCE_GROUP: dns-rg  # Replace with your DNS Resource Group
+      DOMAIN: beginningazurestaticwebapps.com # Replace with your domain
+      SWA_NAME: ${{ vars.SWA_NAME }}
+      RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP }}
+
+    steps:
+      - name: Azure login with OIDC
+        uses: azure/login@v2
+        with:
+            client-id: ${{ secrets.AZURE_CLIENT_ID }}
+            tenant-id: ${{ secrets.AZURE_DIRECTORY_ID }}
+            subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+            enable-AzPSSession: false
+            allow-no-subscriptions: true
+
+      - name: Retrieve SWA Hostname
+        run: |
+            SWA_HOSTNAME=$(az staticwebapp environment list -n "$SWA_NAME" -g "$RESOURCE_GROUP" --query "[?name=='default'].hostname" -o tsv)
+            echo "SWA_HOSTNAME=$SWA_HOSTNAME" >> $GITHUB_ENV
+
+      - name: Create/Update www CNAME Record
+        run: |
+                echo "Setting up www subdomain CNAME record..."
+                echo "Target: www.$DOMAIN -> $SWA_HOSTNAME"
+                
+                # Check if CNAME record already exists
+                #   and points to the right place
+                current_cname=$(az network dns record-set cname show \
+                    --resource-group "$DNS_RESOURCE_GROUP" \
+                    --zone-name "$DOMAIN" \
+                    --name "www" \
+                    --query "cnameRecord.cname" -o tsv 2>/dev/null || echo "")
+                
+                if [ "$current_cname" = "$SWA_HOSTNAME" ]; then
+                    echo "www CNAME already points to"
+                    echo "  $SWA_HOSTNAME - skipping"
+                else
+                    if [ -n "$current_cname" ]; then
+                        echo "Updating www CNAME from"
+                        echo "$current_cname to $SWA_HOSTNAME"
+                        # Delete existing CNAME record
+                        az network dns record-set cname delete \
+                            --resource-group "$DNS_RESOURCE_GROUP" \
+                            --zone-name "$DOMAIN" \
+                            --name "www" \
+                            --yes
+                    else
+                        echo "Creating new www CNAME record -> "
+                        echo "  $SWA_HOSTNAME"
+                    fi
+                    
+                    # Create the CNAME record
+                    az network dns record-set cname set-record \
+                        --resource-group "$DNS_RESOURCE_GROUP" \
+                        --zone-name "$DOMAIN" \
+                        --record-set-name "www" \
+                        --cname "$SWA_HOSTNAME" \
+                        --ttl 3600
+                    
+                    echo "www CNAME record created successfully"
+                fi
+
+      - name: Create/Update Apex Alias A Record  
+        run: |
+            echo "Setting up apex domain alias A record..."
+            echo "Target: $DOMAIN -> Static Web App Resource (alias)"
+            
+            # Build the Static Web App resource ID for the alias record
+            SWA_RESOURCE_ID="/subscriptions/$(az account show --query id -o tsv)/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Web/staticSites/$SWA_NAME"
+            echo "Static Web App Resource ID: $SWA_RESOURCE_ID"
+            
+            # Check if alias A record already exists 
+            #   and points to the right resource
+            current_target=$(az network dns record-set a show \
+                --resource-group "$DNS_RESOURCE_GROUP" \
+                --zone-name "$DOMAIN" \
+                --name "@" \
+                --query "targetResource.id" -o tsv 2>/dev/null || echo "")
+            
+            if [ "$current_target" = "$SWA_RESOURCE_ID" ]; then
+                echo "Apex alias A record already points to"
+                echo "  Static Web App - skipping"
+            else
+                # Remove any existing A record 
+                #   (whether alias or regular IP-based)
+                if az network dns record-set a show --resource-group "$DNS_RESOURCE_GROUP" --zone-name "$DOMAIN" --name "@" >/dev/null 2>&1; then
+                    echo "Replacing existing apex A record"
+                    echo "  with alias A record"
+                    az network dns record-set a delete \
+                        --resource-group "$DNS_RESOURCE_GROUP" \
+                        --zone-name "$DOMAIN" \
+                        --name "@" \
+                        --yes
+                else
+                    echo "Creating new apex alias A record for"
+                    echo "  Static Web App"
+                fi
+                
+                # Create the alias A record pointing 
+                #   to the Static Web App resource
+                az network dns record-set a create \
+                    --resource-group "$DNS_RESOURCE_GROUP" \
+                    --zone-name "$DOMAIN" \
+                    --name "@" \
+                    --target-resource "$SWA_RESOURCE_ID" \
+                    --ttl 3600
+                
+                echo "Apex alias A record created successfully"
+            fi
+
+      - name: Set Subdomain Hostname
+        run: |
+          az staticwebapp hostname set -n "$SWA_NAME" -g "$RESOURCE_GROUP" --hostname www.$DOMAIN --no-wait
+
+      - name: Set Apex Hostname (TXT Token Validation)
+        run: |
+            # Set up the hostname with DNS TXT token validation
+            az staticwebapp hostname set \
+                -n "$SWA_NAME" \
+                -g "$RESOURCE_GROUP" \
+                --hostname "$DOMAIN" \
+                --validation-method "dns-txt-token" --no-wait
+
+            echo "Waiting 30 seconds for hostname setup to register..."
+            sleep 30
+
+            VALIDATION_TOKEN=""
+            ATTEMPT=0
+            MAX_ATTEMPTS=6
+
+            while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+                echo "Attempt $ATTEMPT/$MAX_ATTEMPTS"
+                echo "Checking for validation token..."
+                
+                VALIDATION_TOKEN=$(az staticwebapp hostname show \
+                    -n "$SWA_NAME" \
+                    -g "$RESOURCE_GROUP" \
+                    --hostname "$DOMAIN" \
+                    --query "validationToken" \
+                    -o tsv 2>/dev/null || echo "")
+                
+                if [ -n "$VALIDATION_TOKEN" ] && ➥
+                  [ "$VALIDATION_TOKEN" != "null" ]; then
+                    echo "Validation token retrieved: $VALIDATION_TOKEN"
+                    break
+                fi
+                
+                if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+                    echo "Timeout: Validation token not "
+                    echo "  available after 30 minutes"
+                    exit 1
+                fi
+                
+                echo "Token not ready yet, sleeping for 5 minutes..."
+                sleep 300  # 5 minutes
+                ATTEMPT=$((ATTEMPT + 1))
+            done
+
+            echo "VALIDATION_TOKEN=$VALIDATION_TOKEN" >> $GITHUB_ENV
+
+      - name: Create TXT Record in Azure DNS
+        run: |
+            echo "Setting up TXT record for domain validation..."
+
+            # Check if TXT record already exists 
+            #  and contains our validation token
+            existing_tokens=$(az network dns record-set txt show \
+                --resource-group "$DNS_RESOURCE_GROUP" \
+                --zone-name "$DOMAIN" \
+                --name "@" \
+                --query "txtRecords[].value[]" -o tsv 2>/dev/null || echo "")
+
+            if echo "$existing_tokens" | grep -q "^$VALIDATION_TOKEN$"; then
+                echo "TXT record already contains validation token"
+                echo "skipping"
+            else
+                if [ -n "$existing_tokens" ]; then
+                    echo "TXT record exists "
+                    echo "  but doesn't contain our validation token"
+                    echo "Adding validation token to existing TXT records"
+                    echo "Existing tokens will be preserved"
+                else
+                    echo "Creating new TXT record with validation token..."
+                fi
+                
+                az network dns record-set txt add-record \
+                    --resource-group "$DNS_RESOURCE_GROUP" \
+                    --zone-name "$DOMAIN" \
+                    --record-set-name "@" \
+                    --value "$VALIDATION_TOKEN"
+                
+                echo "TXT record updated successfully"
+                
+                # Show current TXT records for transparency
+                if [ -n "$existing_tokens" ]; then
+                    echo ""
+                    echo "If recreating an existing SWA, you may want"
+                    echo "  to manually remove old validation tokens"
+                    echo "Only remove tokens you recognize as belonging"
+                    echo "  to your previous SWA deployments"
+                fi
+            fi
+
+

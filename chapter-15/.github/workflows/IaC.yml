@@ -1,0 +1,50 @@
+name: Create and Setup SWA Infrastructure
+
+on:
+  workflow_dispatch
+
+permissions:
+  id-token: write # Required for OIDC authentication
+  contents: read  # Required for actions/checkout
+
+jobs:
+  swa-create:
+    name: Ensure SWA is Created
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Azure login with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_DIRECTORY_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          # We are forcing a different flow because of 
+          #   MSAL issues at time of writing
+          enable-AzPSSession: false
+          allow-no-subscriptions: true
+
+      - name: Create SWA
+        id: create-swa
+        uses: azure/CLI@v2
+        with:
+          azcliversion: latest
+          inlineScript: |
+            az config set extension.use_dynamic_install=yes_without_prompt
+            az group create -n ${{vars.RESOURCE_GROUP}} \
+              -l ${{vars.AZURE_REGION}}
+            az deployment group create \
+              --resource-group ${{vars.RESOURCE_GROUP}} \
+              --template-file main.bicep \
+              --parameters name=${{vars.SWA_NAME}} \
+              sku='Standard'
+            az staticwebapp appsettings set \
+              --name ${{vars.SWA_NAME}} \
+              --resource-group ${{vars.RESOURCE_GROUP}} \
+              --setting-names \
+                    CosmosDbConnectionString="${{ secrets.COSMOS_CONNECTION_STRING}}" \
+                    AUTH_CLIENT_SECRET="${{ secrets.AUTH_CLIENT_SECRET}}" \
+                    AUTH_CLIENT_ID="${{ secrets.AUTH_CLIENT_ID}}"

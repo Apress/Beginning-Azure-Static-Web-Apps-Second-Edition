@@ -1,0 +1,24 @@
+﻿@inject NavigationManager navigationManager
+
+<article @onclick=@Navigate>
+    <h2>@Summary.Title</h2>
+    <div>
+        @foreach (var tag in Summary.Tags)
+        {
+            <em>@tag, </em>
+        }
+    </div>
+    <div>
+        @((MarkupString)Markdown.ToHtml(Summary.BlogpostMarkdown))
+    </div>
+</article>
+
+@code {
+    [Parameter]
+    [EditorRequired]
+    public required Blogpost Summary { get; set; }
+
+    void Navigate() =>
+      navigationManager
+        .NavigateTo($"/blogposts/{Summary.Author}/{Summary.Id}");
+}

@@ -1,0 +1,66 @@
+﻿@page "/blogposts"
+@inject BlogpostSummaryService service
+@implements IDisposable
+@inject BlogpostService blogpostService
+@inject NavigationManager navigationManager
+
+<PageTitle>Blogposts</PageTitle>
+<h1>Blogposts</h1>
+
+<AuthorizeView Roles="admin">
+    <Authorized>
+        <button @onclick="@(() =>
+                        navigationManager.NavigateTo("/blogposts/new"))">
+            Create Blogpost
+        </button>
+    </Authorized>
+</AuthorizeView>
+
+
+@if (service.Summaries is null)
+{
+    <div>Loading...</div>
+}
+else
+{
+    foreach (var blogpostSummary in service.Summaries.OrderByDescending(bps => bps.PublishedDate))
+    {
+        <BlogpostSummary Summary="@blogpostSummary" />
+        var editAddress =
+  $"/blogposts/{@blogpostSummary.Author}/{@blogpostSummary.Id}/edit";
+
+        <AuthorizeView Roles="admin">
+            <Authorized>
+                <button @onclick="@(() =>
+                                navigationManager.NavigateTo(editAddress))">
+                    Edit BlogPost
+                </button>
+                <button @onclick="(() =>
+                                blogpostService
+                                .Delete(blogpostSummary.Id, blogpostSummary.Author))">
+                    Delete Blogpost
+                </button>
+            </Authorized>
+        </AuthorizeView>
+    }
+}
+
+@code
+{
+    protected override async Task OnInitializedAsync()
+    {
+        await service.LoadBlogpostSummaries();
+        service.SummariesRefreshed += OnSummariesRefreshed;
+    }
+
+    public void Dispose()
+    {
+        service.SummariesRefreshed -= OnSummariesRefreshed;
+    }
+
+    private void OnSummariesRefreshed(object? sender, EventArgs e)
+    {
+        StateHasChanged();
+    }
+
+}
